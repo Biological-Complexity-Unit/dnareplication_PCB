@@ -1,0 +1,102 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup}
+library(ggplot2)
+library(data.table)
+library(Biostrings)
+library(rtracklayer)
+library(ggpubr)
+
+theme_set(theme_pubr(base_size=8))
+
+my_scale_log10 <- function(scale, ...) scale(
+  breaks = scales::trans_breaks("log10", function(x) 10^x),
+  labels = scales::trans_format("log10", scales::math_format(10^.x)),
+  oob=scales::oob_keep,
+  ...
+)
+
+my_scale_pretransformed_log10 <- function(scale, ...) scale(
+  labels = scales::trans_format("identity", scales::math_format(10^.x)),
+  oob=scales::oob_keep,
+  ...
+)
+
+W <- 1000
+CHR <- 4
+V <- 1600 / 60 # Sekedat 2010, Mol. Syst. Biol. 2010;6:353
+LAMBDA <- log(2)/(120*60)
+CV <- 0.04
+```
+
+
+```{r read_genome}
+GENOME <- readDNAStringSet("data/s_cerevisiae.W303.fna.gz")
+GENOME.SEQ2CHR <- sapply(gsub(".*W303 ([^,]*),.*", "\\1", names(GENOME)), function(s) {
+  if (grepl("^chromosome [XVI]*$", s))
+    paste0("chr", as.numeric(as.roman(gsub("chromosome (.*)", "\\1", s))))
+  else s
+})
+names(GENOME.SEQ2CHR) <- gsub("^([^ ]*).*$", "\\1", names(GENOME))
+names(GENOME) <- GENOME.SEQ2CHR
+
+GENOME.CHRLENS <- nchar(GENOME)
+GENOME.MAX_X <- cumsum(GENOME.CHRLENS)
+GENOME.LEN <- sum(GENOME.CHRLENS)
+X <- seq(from=W, to=GENOME.CHRLENS[CHR], by=W)
+```
+
+
+```{r read_annotation}
+if (!file.exists("origins.true.rd")) {
+  ANN <- rtracklayer::import.gff("data/s_cerevisiae.W303.gff.gz")
+  ANN.REP_ORIGIN <- ANN[ANN$gbkey=="rep_origin"]
+  ORIGINS.ANN <- data.table(
+    chr=as.vector(match(seqnames(ANN.REP_ORIGIN), names(GENOME.SEQ2CHR))),
+    seq=as.vector(GENOME.SEQ2CHR[as.character(seqnames(ANN.REP_ORIGIN))]),
+    start=start(ANN.REP_ORIGIN),
+    end=end(ANN.REP_ORIGIN),
+    length=end(ANN.REP_ORIGIN) - start(ANN.REP_ORIGIN),
+    position=(start(ANN.REP_ORIGIN) + end(ANN.REP_ORIGIN))/2
+  )[, list(
+    seq, start, end, length, position,
+    x=if(chr > 1) sum(GENOME.CHRLENS[1:(chr-1)]) + position else position,
+    w=1
+  ), by=.(chr)]
+  
+  ORIGINS.ANN[, intensity := exp(runif(.N, log(1e-5), log(2e-3))) ]
+  save(ORIGINS.ANN, file="origins.true.rd")
+} else {
+  load(file="origins.true.rd")
+}
+```
+
+
+```{r}
+if (!file.exists("abundance.true.rd")) {
+  source("abundance.R")
+  
+  A.MODEL <- data.table(
+    x=X,
+    chr=CHR,
+    seq=paste0("chr", CHR),
+    location=X,
+    P.true=A(X, ORIGINS.ANN[chr==CHR, position], ORIGINS.ANN[chr==CHR, intensity]*V,
+            lambda=LAMBDA, v=V)
+  )
+  A.MODEL[, A.true := P.true / (sum(P.true) * W)]
+  A.MODEL[, P.sim := P.true*rgamma(.N, shape=1/CV^2, scale=CV^2)]
+  A.MODEL[, A.sim := P.sim / (sum(P.sim) * W)]
+  save(A.MODEL, file="abundance.true.rd")
+} else
+  load(file="abundance.true.rd")
+```
+
+```{r}
+write.table(file=bzfile("data/simulated/CV-0.04/Truth/chr4.dat.bz2"),
+            A.MODEL[, list(as.integer(x), A.sim, NA_real_)],
+            sep="\t", row.names=FALSE, col.names=FALSE, na="nan")
+```
